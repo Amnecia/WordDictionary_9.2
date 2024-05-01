@@ -1,8 +1,12 @@
 import os
 from os.path import join, dirname
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify
+
+from flask import Flask, render_template, request, redirect, url_for, jsonify
 from pymongo import MongoClient
+import requests
+from datetime import datetime
+from bson import ObjectId
 
 dotenv_path = join(dirname(__file__), '.env')
 load_dotenv(dotenv_path)
@@ -12,50 +16,115 @@ DB_NAME =  os.environ.get("DB_NAME")
 
 client = MongoClient(MONGODB_URI)
 db = client[DB_NAME]
+
+
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-   return render_template('index.html')
 
-@app.route("/movie", methods=["POST"])
-def movie_post():
-    # sample_receive = request.form['sample_give']
-    url_receive = request.form['url_give']
-    star_receive = request.form['star_give']
-    comment_receive = request.form['comment_give']
 
-    headers = {'User-Agent' : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36'}
-    data = requests.get(url_receive, headers=headers)
 
-    soup = BeautifulSoup(data.text, 'html.parser')
+@app.route("/")
+def main():
+    words_result = db.words.find({}, {"_id": False})
+    words = []
+    for word in words_result:
+        definition = word["definitions"][0]["shortdef"]
+        definition = definition if type(definition) is str else definition[0]
+        words.append(
+            {
+                "word": word["word"],
+                "definition": definition,
+            }
+        )
+    msg = request.args.get("msg")
+    return render_template("index.html", words=words, msg=msg)
 
-    # From here on, we will write the code for extracting data from meta tags
+@app.route('/detail/<keyword>')
+def detail(keyword):
+    api_key = '520486e7-3de1-46cf-864e-c7475e294133'
+    url = f'https://www.dictionaryapi.com/api/v3/references/collegiate/json/{keyword}?key={api_key}'
+    response = requests.get(url)
+    definitions = response.json()
+    if not definitions:
+        return redirect(url_for(
+            'main',
+            msg=f'Could not find the word, "{keyword}"'
+        ))
+    if type(definitions[0]) is str:
+         suggestions = ', '.join(definitions)
+         return redirect(url_for(
+            'main',
+            msg=f'Could not find the word, "{keyword}", did you mean : {suggestions}'
+         ))
+    return render_template(
+        'detail.html',
+        word=keyword,
+        definitions=definitions,
+        status=request.args.get('status_give', 'new')
+    )
 
-    og_image = soup.select_one('meta[property="og:image"]')
-    og_title = soup.select_one('meta[property="og:title"]')
-    og_description = soup.select_one('meta[property="og:description"]')
-
-    image = og_image['content']
-    title = og_title['content']
-    description = og_description['content']
-    
+@app.route('/api/save_word', methods=['POST'])
+def save_word():
+    json_data = request.get_json()
+    word = json_data.get('word_give')
+    definitions = json_data.get('definitions_give')
     doc = {
-        'image': image,
-        'title': title,
-        'description': description,
-        'star': star_receive,
-        'comment': comment_receive,
+        'word': word,
+        'definitions': definitions,
+        'date' : datetime.now().strftime('%Y-%m-%d')
     }
+    db.words.insert_one(doc)
+    return jsonify({
+        'result': 'success',
+        'msg': f'the word, {word}, was saved!!!',
+    })
 
-    db.movies.insert_one(doc)
+@app.route("/api/get_exs", methods=["GET"])
+def get_exs():
+    word = request.args.get("word")
+    example_data = db.examples.find({"word": word})
+    examples = []
+    for example in example_data:
+        examples.append(
+            {"example": example.get("example"), "id": str(example.get("_id"))}
+        )
+    print("examples", examples)
+    return jsonify({"result": "success", "examples": examples})
 
-    return jsonify({'msg':'POST request!'})
 
-@app.route("/movie", methods=["GET"])
-def movie_get():
-    movie_list = list(db.movies.find({}, {'_id': False}))
-    return jsonify({'movies': movie_list})
+@app.route("/api/save_ex", methods=["POST"])
+def save_ex():
+    word = request.form.get("word")
+    example = request.form.get("example")
+    doc = {
+        "word": word,
+        "example": example,
+    }
+    db.examples.insert_one(doc)
+    return jsonify(
+        {
+            "result": "success",
+            "msg": f'Your example, "{example}", for "{word}" was saved!',
+        }
+    )
+@app.route('/api/delete_word', methods=['POST'])
+def delete_word():
+    word = request.form.get('word_give')
+    db.words.delete_one({'word': word})
+    return jsonify({
+        'result': 'success',
+        'msg': f'the word {word} was deleted'
+    })
+
+@app.route("/api/delete_ex", methods=["POST"])
+def delete_ex():
+    id = request.form.get("id")
+    word = request.form.get("word")
+    db.examples.delete_one({"_id": ObjectId(id)})
+    return jsonify(
+        {"result": "success", "msg": f'Your word, "{word}", was deleted successfully'}
+    )
+
 
 if __name__ == '__main__':
-   app.run('0.0.0.0', port=5000, debug=True)
+    app.run('0.0.0.0', port=5000, debug=True)
